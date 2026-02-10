@@ -1,34 +1,105 @@
-.App-logo {
-    height: 40vmin;
+/* Global App Styles */
+.App {
+    min-height: 100vh;
+}
+
+/* Hero glow effect */
+.hero-glow {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    background: radial-gradient(circle at center, rgba(204, 255, 0, 0.12) 0%, rgba(5, 5, 5, 0) 60%);
     pointer-events: none;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-    .App-logo {
-        animation: App-logo-spin infinite 20s linear;
-    }
+/* Glass card effect */
+.glass-card {
+    backdrop-filter: blur(24px);
+    background: rgba(10, 10, 10, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.App-header {
-    background-color: #0f0f10;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    font-size: calc(10px + 2vmin);
-    color: white;
+/* Primary button hover */
+.btn-primary {
+    @apply bg-primary text-primary-foreground font-bold uppercase tracking-wider px-8 py-4 rounded-sm transition-all;
 }
 
-.App-link {
-    color: #61dafb;
+.btn-primary:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 0 0 rgba(255, 255, 255, 0.2);
 }
 
-@keyframes App-logo-spin {
+/* Stepper styles */
+.stepper-line {
+    height: 2px;
+    background: linear-gradient(90deg, hsl(var(--primary)) var(--progress, 0%), hsl(var(--border)) var(--progress, 0%));
+}
+
+/* Job status badges */
+.status-queued {
+    @apply bg-yellow-500/20 text-yellow-400 border border-yellow-500/30;
+}
+
+.status-processing {
+    @apply bg-blue-500/20 text-blue-400 border border-blue-500/30;
+}
+
+.status-done {
+    @apply bg-green-500/20 text-green-400 border border-green-500/30;
+}
+
+.status-failed {
+    @apply bg-red-500/20 text-red-400 border border-red-500/30;
+}
+
+.status-expired {
+    @apply bg-gray-500/20 text-gray-400 border border-gray-500/30;
+}
+
+/* Upload dropzone */
+.dropzone {
+    @apply border-2 border-dashed border-border rounded-sm p-12 text-center cursor-pointer transition-all;
+}
+
+.dropzone:hover,
+.dropzone.active {
+    @apply border-primary bg-primary/5;
+}
+
+/* 3D canvas container */
+.canvas-container {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+/* Animate fade in */
+@keyframes fadeIn {
     from {
-        transform: rotate(0deg);
+        opacity: 0;
+        transform: translateY(10px);
     }
     to {
-        transform: rotate(360deg);
+        opacity: 1;
+        transform: translateY(0);
     }
+}
+
+.animate-fade-in {
+    animation: fadeIn 0.5s ease-out forwards;
+}
+
+.animate-fade-in-delay-1 {
+    animation: fadeIn 0.5s ease-out 0.1s forwards;
+    opacity: 0;
+}
+
+.animate-fade-in-delay-2 {
+    animation: fadeIn 0.5s ease-out 0.2s forwards;
+    opacity: 0;
+}
+
+.animate-fade-in-delay-3 {
+    animation: fadeIn 0.5s ease-out 0.3s forwards;
+    opacity: 0;
 }
