@@ -1,0 +1,128 @@
+{
+  "identity": {
+    "name": "Prompt Video Editor",
+    "persona": "E1 - The Anti-AI Designer",
+    "vibe": "Cinematic, Technical, Edgy, Minimalist",
+    "archetype": "The Performance Pro (Dark Mode Exclusive)"
+  },
+  "typography": {
+    "font_family": {
+      "headings": "Space Grotesk, sans-serif",
+      "body": "DM Sans, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "installation": "Import from Google Fonts: https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,100..1000&family=JetBrains+Mono:wght@100..800&family=Space+Grotesk:wght@300..700&display=swap",
+    "rules": {
+      "headings": "tracking-tight font-bold uppercase",
+      "body": "tracking-normal leading-relaxed",
+      "labels": "font-mono text-xs tracking-widest uppercase text-muted-foreground"
+    }
+  },
+  "colors": {
+    "palette": {
+      "background": "#050505",
+      "foreground": "#EDEDED",
+      "card": "#0A0A0A",
+      "card_foreground": "#FFFFFF",
+      "popover": "#0A0A0A",
+      "popover_foreground": "#FFFFFF",
+      "primary": "#CCFF00",
+      "primary_foreground": "#000000",
+      "secondary": "#1F1F1F",
+      "secondary_foreground": "#FFFFFF",
+      "muted": "#1F1F1F",
+      "muted_foreground": "#888888",
+      "accent": "#1F1F1F",
+      "accent_foreground": "#CCFF00",
+      "destructive": "#FF3B30",
+      "destructive_foreground": "#FFFFFF",
+      "border": "#262626",
+      "input": "#1F1F1F",
+      "ring": "#CCFF00"
+    },
+    "gradients": {
+      "hero_glow": "radial-gradient(circle at center, rgba(204, 255, 0, 0.15) 0%, rgba(5, 5, 5, 0) 70%)",
+      "glass": "linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.01) 100%)"
+    }
+  },
+  "layout": {
+    "spacing": {
+      "container_padding": "p-6 md:p-12 lg:p-24",
+      "section_gap": "gap-16 md:gap-32",
+      "element_gap": "gap-4 md:gap-8"
+    },
+    "grid_system": {
+      "bento": "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4",
+      "hero": "flex flex-col items-center justify-center min-h-[80vh] text-center relative overflow-hidden"
+    },
+    "border_radius": {
+      "default": "rounded-none",
+      "card": "rounded-sm",
+      "button": "rounded-sm"
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-primary text-primary-foreground hover:bg-primary/90 font-bold uppercase tracking-wider px-8 py-4 rounded-sm transition-all hover:translate-y-[-2px] hover:shadow-[0_4px_0_0_rgba(255,255,255,0.2)]",
+      "secondary": "bg-secondary text-secondary-foreground hover:bg-secondary/80 font-medium px-6 py-3 rounded-sm border border-white/10",
+      "ghost": "hover:bg-white/5 text-muted-foreground hover:text-foreground"
+    },
+    "cards": {
+      "base": "bg-card border border-white/10 p-6 relative overflow-hidden group hover:border-primary/50 transition-colors duration-300",
+      "glass": "backdrop-blur-xl bg-black/40 border border-white/10"
+    },
+    "inputs": {
+      "base": "bg-input border-transparent focus:border-primary focus:ring-1 focus:ring-primary rounded-sm h-12 px-4 font-mono text-sm transition-all placeholder:text-muted-foreground/50"
+    },
+    "stepper": {
+      "container": "flex items-center justify-between w-full max-w-3xl mx-auto mb-12",
+      "step_active": "text-primary font-bold border-b-2 border-primary pb-2",
+      "step_inactive": "text-muted-foreground border-b-2 border-transparent pb-2"
+    }
+  },
+  "visual_enhancers": {
+    "noise": "url(\"data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.05'/%3E%3C/svg%3E\")",
+    "glass_morphism": "backdrop-blur-xl bg-black/30 border border-white/10 shadow-2xl",
+    "glow_effects": "shadow-[0_0_30px_-5px_rgba(204,255,0,0.3)]"
+  },
+  "motion": {
+    "libraries": ["framer-motion", "react-three-fiber"],
+    "transitions": {
+      "default": "transition-all duration-300 ease-out",
+      "hover": "hover:scale-[1.02] active:scale-[0.98]"
+    },
+    "3d_scene": {
+      "description": "Abstract floating geometric shapes (wireframe cubes or spheres) that rotate slowly and react to mouse position. Use neon green wireframes.",
+      "location": "Upload Step in /tool and Hero Background"
+    }
+  },
+  "image_urls": {
+    "hero_bg": "https://images.unsplash.com/photo-1550176593-d107c56ca211?crop=entropy&cs=srgb&fm=jpg&q=85",
+    "features": [
+      "https://images.unsplash.com/photo-1565590915406-9c386cc9391d?crop=entropy&cs=srgb&fm=jpg&q=85",
+      "https://images.unsplash.com/photo-1765163076573-26499e530ec8?crop=entropy&cs=srgb&fm=jpg&q=85"
+    ],
+    "testimonials": [
+      "https://images.unsplash.com/photo-1758874573672-e2731bd577e7?crop=entropy&cs=srgb&fm=jpg&q=85",
+      "https://images.unsplash.com/photo-1713946598544-c3d106930f72?crop=entropy&cs=srgb&fm=jpg&q=85",
+      "https://images.unsplash.com/photo-1674767597051-37af3b73c2ca?crop=entropy&cs=srgb&fm=jpg&q=85"
+    ]
+  },
+  "instructions_to_main_agent": [
+    "1. THEME SETUP: Update tailwind.config.js with the colors provided in this JSON. Use the 'Acid Lime' (#CCFF00) as the primary color. Ensure 'dark' class is always applied to the html/body.",
+    "2. FONTS: Add the Google Fonts import to index.css immediately.",
+    "3. LAYOUT: For the Landing Page, use a 'Bento Grid' layout for features. Do not use standard 3-column rows.",
+    "4. 3D: Implement a simple React Three Fiber scene in the 'Upload' step of the tool. It should be a rotating wireframe object that signifies 'processing' or 'tech'.",
+    "5. STEPPER: Build a custom stepper for /tool. It should be minimal (Just text labels 'Upload', 'Payment', 'Prompt' with a progress line).",
+    "6. GLASSMORPHISM: Use the glass_morphism utility class defined in visual_enhancers for the Navbar and any floating modals.",
+    "7. NOISE: Add the noise texture to the body background to prevent the 'flat digital' look.",
+    "8. DATA-TESTID: Add data-testid to all interactive elements (buttons, inputs, links) as requested."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "Avoid 'AI Slop': Do not use generic gradients or centered layouts everywhere.",
+    "Dark Mode Only: This app is strictly dark mode. Do not implement a light mode toggle.",
+    "Sharp Edges: Use rounded-sm or rounded-none for a more 'technical/pro' feel. Avoid fully rounded buttons.",
+    "Micro-interactions: Add hover states to everything. Buttons should lift or glow on hover.",
+    "Spacing: Use double the spacing you think you need. p-12 is better than p-6."
+  ]
+}
