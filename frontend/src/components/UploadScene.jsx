@@ -1,97 +1,98 @@
-import { Canvas, useFrame } from "@react-three/fiber";
-import { useRef, useMemo } from "react";
-import * as THREE from "three";
-
-const WireframeBox = ({ progress = 0 }) => {
-  const meshRef = useRef();
-  const edgesRef = useRef();
-  
-  useFrame((state) => {
-    if (meshRef.current) {
-      meshRef.current.rotation.x += 0.003;
-      meshRef.current.rotation.y += 0.005;
-      
-      // Scale based on progress
-      const scale = 1 + (progress / 100) * 0.3;
-      meshRef.current.scale.setScalar(scale);
-    }
-  });
-
-  const geometry = useMemo(() => new THREE.BoxGeometry(2, 2, 2), []);
-  const edges = useMemo(() => new THREE.EdgesGeometry(geometry), [geometry]);
-
-  return (
-    <group ref={meshRef}>
-      <lineSegments ref={edgesRef}>
-        <primitive object={edges} attach="geometry" />
-        <lineBasicMaterial 
-          attach="material" 
-          color="#CCFF00" 
-          transparent 
-          opacity={0.8}
-          linewidth={2}
-        />
-      </lineSegments>
-      <mesh>
-        <boxGeometry args={[2, 2, 2]} />
-        <meshBasicMaterial color="#CCFF00" transparent opacity={0.05} />
-      </mesh>
-    </group>
-  );
-};
-
-const FloatingParticles = ({ count = 50, progress = 0 }) => {
-  const pointsRef = useRef();
-  
-  const particles = useMemo(() => {
-    const positions = new Float32Array(count * 3);
-    for (let i = 0; i < count; i++) {
-      positions[i * 3] = (Math.random() - 0.5) * 10;
-      positions[i * 3 + 1] = (Math.random() - 0.5) * 10;
-      positions[i * 3 + 2] = (Math.random() - 0.5) * 10;
-    }
-    return positions;
-  }, [count]);
-
-  useFrame((state) => {
-    if (pointsRef.current) {
-      pointsRef.current.rotation.y += 0.001;
-      pointsRef.current.rotation.x += 0.0005;
-    }
-  });
-
-  return (
-    <points ref={pointsRef}>
-      <bufferGeometry>
-        <bufferAttribute
-          attach="attributes-position"
-          count={count}
-          array={particles}
-          itemSize={3}
-        />
-      </bufferGeometry>
-      <pointsMaterial 
-        color="#CCFF00" 
-        size={0.05} 
-        transparent 
-        opacity={0.6 + (progress / 100) * 0.4}
-        sizeAttenuation
-      />
-    </points>
-  );
-};
-
+// Simple CSS-based animation fallback (R3F has React 19 compatibility issues)
 const UploadScene = ({ progress = 0 }) => {
   return (
-    <div className="absolute inset-0 pointer-events-none" data-testid="upload-3d-scene">
-      <Canvas
-        camera={{ position: [0, 0, 6], fov: 50 }}
-        style={{ background: "transparent" }}
+    <div className="absolute inset-0 pointer-events-none overflow-hidden" data-testid="upload-3d-scene">
+      {/* Animated background */}
+      <div 
+        className="absolute inset-0 flex items-center justify-center"
+        style={{
+          background: `radial-gradient(circle at center, rgba(204, 255, 0, ${0.05 + progress * 0.002}) 0%, transparent 70%)`
+        }}
       >
-        <ambientLight intensity={0.5} />
-        <WireframeBox progress={progress} />
-        <FloatingParticles count={100} progress={progress} />
-      </Canvas>
+        {/* Rotating wireframe cube (CSS) */}
+        <div 
+          className="relative"
+          style={{
+            width: `${150 + progress}px`,
+            height: `${150 + progress}px`,
+            animation: 'spin3d 8s linear infinite',
+            transformStyle: 'preserve-3d',
+          }}
+        >
+          {/* Cube faces */}
+          {[...Array(6)].map((_, i) => (
+            <div
+              key={i}
+              className="absolute inset-0 border-2 border-primary/40"
+              style={{
+                transform: [
+                  'translateZ(75px)',
+                  'rotateY(180deg) translateZ(75px)',
+                  'rotateY(90deg) translateZ(75px)',
+                  'rotateY(-90deg) translateZ(75px)',
+                  'rotateX(90deg) translateZ(75px)',
+                  'rotateX(-90deg) translateZ(75px)',
+                ][i],
+                background: `rgba(204, 255, 0, ${0.02 + progress * 0.0005})`,
+              }}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Floating particles */}
+      <div className="absolute inset-0">
+        {[...Array(20)].map((_, i) => (
+          <div
+            key={i}
+            className="absolute w-1 h-1 rounded-full bg-primary/60"
+            style={{
+              left: `${Math.random() * 100}%`,
+              top: `${Math.random() * 100}%`,
+              animation: `float ${3 + Math.random() * 4}s ease-in-out infinite`,
+              animationDelay: `${Math.random() * 2}s`,
+            }}
+          />
+        ))}
+      </div>
+
+      {/* Progress indicator ring */}
+      <div className="absolute inset-0 flex items-center justify-center">
+        <svg className="w-64 h-64 -rotate-90" viewBox="0 0 100 100">
+          <circle
+            cx="50"
+            cy="50"
+            r="45"
+            stroke="currentColor"
+            strokeWidth="0.5"
+            fill="none"
+            className="text-border"
+          />
+          <circle
+            cx="50"
+            cy="50"
+            r="45"
+            stroke="currentColor"
+            strokeWidth="1"
+            fill="none"
+            strokeDasharray={`${progress * 2.83} 283`}
+            strokeLinecap="round"
+            className="text-primary transition-all duration-300"
+          />
+        </svg>
+      </div>
+
+      {/* CSS Animations */}
+      <style>{`
+        @keyframes spin3d {
+          0% { transform: rotateX(0deg) rotateY(0deg); }
+          100% { transform: rotateX(360deg) rotateY(360deg); }
+        }
+        @keyframes float {
+          0%, 100% { transform: translateY(0) scale(1); opacity: 0.6; }
+          50% { transform: translateY(-20px) scale(1.2); opacity: 1; }
+        }
+      `}</style>
     </div>
   );
 };
