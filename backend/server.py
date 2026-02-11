@@ -366,6 +366,9 @@ async def init_upload(input: UploadInitInput, request: Request, user: dict = Dep
     backend_url = str(request.base_url).rstrip('/')
     if '/api/' in backend_url:
         backend_url = backend_url.split('/api/')[0]
+    # Ensure HTTPS in production
+    if 'preview.emergentagent.com' in backend_url:
+        backend_url = backend_url.replace('http://', 'https://')
     presigned_url = f"{backend_url}/api/uploads/presigned/{object_key}"
     
     quote = None
