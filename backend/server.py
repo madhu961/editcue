@@ -362,7 +362,10 @@ async def init_upload(input: UploadInitInput, user: dict = Depends(get_current_u
     requires_payment = input.size_bytes > PAYMENT_THRESHOLD
     
     # MOCKED: Generate presigned URL (in production, use DigitalOcean Spaces)
-    backend_url = os.environ.get('REACT_APP_BACKEND_URL', 'http://localhost:8001')
+    # Use the request's base URL to ensure correct domain
+    backend_url = str(request.base_url).rstrip('/')
+    if '/api/' in backend_url:
+        backend_url = backend_url.split('/api/')[0]
     presigned_url = f"{backend_url}/api/uploads/presigned/{object_key}"
     
     quote = None
