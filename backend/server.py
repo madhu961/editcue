@@ -348,7 +348,7 @@ async def verify_otp(input: OTPVerifyInput, response: Response):
 # ============== UPLOAD ENDPOINTS ==============
 
 @api_router.post("/uploads/init", response_model=UploadInitResponse)
-async def init_upload(input: UploadInitInput, user: dict = Depends(get_current_user)):
+async def init_upload(input: UploadInitInput, request: Request, user: dict = Depends(get_current_user)):
     """Initialize upload and get presigned URL"""
     ext = input.ext.lower().lstrip('.')
     
