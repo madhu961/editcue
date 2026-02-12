@@ -15,6 +15,31 @@ import random
 import string
 import aiofiles
 import asyncio
+import secrets
+import hashlib
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+
+def hash_otp(email: str, otp: str) -> str:
+    return hashlib.sha256(f"{email}:{otp}".encode()).hexdigest()
+
+async def send_otp_email(to_email: str, otp: str):
+    message = Mail(
+        from_email=os.environ["FROM_EMAIL"],
+        to_emails=to_email,
+        subject="Your EditCue login code",
+        html_content=f"""
+        <div style="font-family:Arial">
+          <h2>Your EditCue OTP</h2>
+          <p>Use this code to log in:</p>
+          <div style="font-size:28px;font-weight:800;letter-spacing:4px">{otp}</div>
+          <p>This code expires in 10 minutes.</p>
+        </div>
+        """
+    )
+    sg = SendGridAPIClient(os.environ["SENDGRID_API_KEY"])
+    sg.send(message)
+
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -271,23 +296,21 @@ async def logout(request: Request, response: Response):
 
 @api_router.post("/auth/otp/request")
 async def request_otp(input: OTPRequestInput):
-    """Request OTP for email login (MOCKED - OTP always 123456)"""
-    otp = "123456"  # MOCKED: In production, generate random OTP
+    otp = f"{secrets.randbelow(10**6):06d}"
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
-    
-    # Store OTP
+
     await db.otps.delete_many({"email": input.email})
     await db.otps.insert_one({
         "email": input.email,
-        "otp": otp,
+        "otp_hash": hash_otp(input.email, otp),
         "expires_at": expires_at.isoformat(),
         "created_at": datetime.now(timezone.utc).isoformat()
     })
-    
-    # MOCKED: In production, send email here
-    logger.info(f"OTP for {input.email}: {otp} (MOCKED)")
-    
-    return {"message": "OTP sent to email", "mocked_otp": otp}
+
+    await send_otp_email(input.email, otp)
+
+    return {"message": "OTP sent to email"}
+
 
 @api_router.post("/auth/otp/verify")
 async def verify_otp(input: OTPVerifyInput, response: Response):
@@ -303,9 +326,8 @@ async def verify_otp(input: OTPVerifyInput, response: Response):
     if expires_at < datetime.now(timezone.utc):
         raise HTTPException(status_code=400, detail="OTP expired")
     
-    if otp_record["otp"] != input.otp:
+    if otp_record["otp_hash"] != hash_otp(input.email, input.otp):
         raise HTTPException(status_code=400, detail="Invalid OTP")
-    
     # Delete used OTP
     await db.otps.delete_one({"email": input.email})
     
@@ -348,6 +370,25 @@ async def verify_otp(input: OTPVerifyInput, response: Response):
     return user
 
 # ============== UPLOAD ENDPOINTS ==============
+import boto3
+from botocore.client import Config
+
+session = boto3.session.Session()
+s3 = session.client(
+    "s3",
+    region_name=os.environ["SPACES_REGION"],
+    endpoint_url=os.environ["SPACES_ENDPOINT"],
+    aws_access_key_id=os.environ["SPACES_KEY"],
+    aws_secret_access_key=os.environ["SPACES_SECRET"],
+    config=Config(signature_version="s3v4"),
+)
+
+def presign_put(bucket: str, key: str, content_type: str, expires=3600):
+    return s3.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": bucket, "Key": key, "ContentType": content_type},
+        ExpiresIn=expires,
+    )
 
 @api_router.post("/uploads/init", response_model=UploadInitResponse)
 async def init_upload(input: UploadInitInput, request: Request, user: dict = Depends(get_current_user)):
@@ -360,18 +401,23 @@ async def init_upload(input: UploadInitInput, request: Request, user: dict = Dep
     if input.size_bytes > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="Unable to process files of this size at the moment.")
     
-    object_key = f"uploads/{user['user_id']}/{uuid.uuid4().hex}.{ext}"
+    safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in input.filename)
+    object_key = f"uploads/{user['user_id']}/{uuid.uuid4().hex}_{safe_name}"
+
     requires_payment = input.size_bytes > PAYMENT_THRESHOLD
     
-    # MOCKED: Generate presigned URL (in production, use DigitalOcean Spaces)
-    # Use the request's base URL to ensure correct domain
-    backend_url = str(request.base_url).rstrip('/')
-    if '/api/' in backend_url:
-        backend_url = backend_url.split('/api/')[0]
-    # Ensure HTTPS in production
-    if 'preview.emergentagent.com' in backend_url:
-        backend_url = backend_url.replace('http://', 'https://')
-    presigned_url = f"{backend_url}/api/uploads/presigned/{object_key}"
+    # Generate presigned PUT URL for DigitalOcean Spaces (S3-compatible)
+    content_type = "application/octet-stream"  # or detect from ext if you want
+    presigned_url = s3.generate_presigned_url(
+        ClientMethod="put_object",
+        Params={
+            "Bucket": SPACES_BUCKET,
+            "Key": object_key,
+            "ContentType": content_type,
+        },
+        ExpiresIn=60 * 15,  # 15 minutes
+    )
+
     
     quote = None
     if requires_payment:
@@ -384,19 +430,14 @@ async def init_upload(input: UploadInitInput, request: Request, user: dict = Dep
         quote=quote
     )
 
-@api_router.put("/uploads/presigned/{object_key:path}")
-async def presigned_upload(object_key: str, request: Request):
-    """MOCKED presigned upload endpoint"""
-    file_path = UPLOAD_DIR / object_key.replace("/", "_")
-    
-    async with aiofiles.open(file_path, 'wb') as f:
-        async for chunk in request.stream():
-            await f.write(chunk)
-    
-    return {"message": "Upload successful", "object_key": object_key}
-
 @api_router.post("/uploads/complete")
 async def complete_upload(input: UploadCompleteInput, user: dict = Depends(get_current_user)):
+    # Optional: verify file exists in Spaces
+    try:
+        s3.head_object(Bucket=SPACES_BUCKET, Key=input.object_key)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Upload not found in storage. Please retry upload.")
+
     """Complete upload and create video record"""
     video_id = f"vid_{uuid.uuid4().hex[:12]}"
     ext = input.object_key.split('.')[-1]
@@ -412,7 +453,9 @@ async def complete_upload(input: UploadCompleteInput, user: dict = Depends(get_c
         "payment_required": input.size_bytes > PAYMENT_THRESHOLD,
         "payment_completed": input.size_bytes <= PAYMENT_THRESHOLD
     }
-    
+    file_url = f"{SPACES_PUBLIC_BASE}/{input.object_key}" if SPACES_PUBLIC_BASE else None
+    video["file_url"] = file_url
+
     await db.videos.insert_one(video)
     
     return {"video_id": video_id, "payment_required": video["payment_required"]}
@@ -444,75 +487,59 @@ async def get_quote(input: BillingQuoteInput, user: dict = Depends(get_current_u
     """Get pricing quote"""
     return calculate_quote(input.size_bytes, input.mode)
 
+import razorpay
+
+client_rzp = razorpay.Client(auth=(os.environ["RAZORPAY_KEY_ID"], os.environ["RAZORPAY_KEY_SECRET"]))
+
 @api_router.post("/billing/checkout")
 async def create_checkout(input: BillingCheckoutInput, user: dict = Depends(get_current_user)):
-    """Create Razorpay checkout (MOCKED)"""
-    video = await db.videos.find_one({"video_id": input.video_id, "user_id": user["user_id"]}, {"_id": 0})
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
-    
+    video = await db.videos.find_one({...})
     quote = calculate_quote(video["size_bytes"], input.mode)
-    
+
     if input.mode == "one_time":
-        # MOCKED: Create Razorpay order
-        razorpay_order_id = f"order_{uuid.uuid4().hex[:12]}"
-        payment = {
-            "payment_id": f"pay_{uuid.uuid4().hex[:12]}",
+        order = client_rzp.order.create({
+            "amount": int(quote["amount"] * 100),
+            "currency": "INR",
+            "receipt": f"{input.video_id}",
+            "notes": {"user_id": user["user_id"], "video_id": input.video_id}
+        })
+
+        await db.payments.insert_one({
             "user_id": user["user_id"],
             "video_id": input.video_id,
-            "amount": quote["amount"],
-            "currency": quote["currency"],
-            "mode": "one_time",
             "status": "pending",
-            "razorpay_order_id": razorpay_order_id,
+            "razorpay_order_id": order["id"],
+            "amount": quote["amount"],
+            "currency": "INR",
             "created_at": datetime.now(timezone.utc).isoformat()
-        }
-        await db.payments.insert_one(payment)
-        
-        return {
-            "order_id": razorpay_order_id,
-            "amount": quote["amount"] * 100,  # Razorpay expects paise
-            "currency": quote["currency"],
-            "key_id": "rzp_test_mocked",  # MOCKED
-            "mocked": True
-        }
-    else:
-        # MOCKED: Create subscription
-        plan_quote = quote.get(input.plan, quote["monthly"])
-        razorpay_subscription_id = f"sub_{uuid.uuid4().hex[:12]}"
-        
-        return {
-            "subscription_id": razorpay_subscription_id,
-            "amount": plan_quote["amount"] * 100,
-            "currency": plan_quote["currency"],
-            "key_id": "rzp_test_mocked",  # MOCKED
-            "plan": input.plan,
-            "mocked": True
-        }
+        })
+
+        return {"order_id": order["id"], "amount": order["amount"], "currency": order["currency"], "key_id": os.environ["RAZORPAY_KEY_ID"]}
+
+import hmac, hashlib
+
+def verify_razorpay_signature(body: bytes, signature: str, secret: str) -> bool:
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
 
 @api_router.post("/billing/webhook")
 async def billing_webhook(request: Request):
-    """Handle Razorpay webhook (MOCKED)"""
-    body = await request.json()
-    
-    # MOCKED: In production, verify signature
-    event = body.get("event")
-    
+    body = await request.body()
+    signature = request.headers.get("X-Razorpay-Signature", "")
+    if not verify_razorpay_signature(body, signature, os.environ["RAZORPAY_WEBHOOK_SECRET"]):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    payload = await request.json()
+    event = payload.get("event")
+
     if event == "payment.captured":
-        order_id = body.get("payload", {}).get("payment", {}).get("entity", {}).get("order_id")
-        if order_id:
-            payment = await db.payments.find_one({"razorpay_order_id": order_id}, {"_id": 0})
-            if payment:
-                await db.payments.update_one(
-                    {"razorpay_order_id": order_id},
-                    {"$set": {"status": "completed"}}
-                )
-                await db.videos.update_one(
-                    {"video_id": payment["video_id"]},
-                    {"$set": {"payment_completed": True}}
-                )
-    
+        order_id = payload["payload"]["payment"]["entity"]["order_id"]
+        payment = await db.payments.find_one({"razorpay_order_id": order_id})
+        if payment:
+            await db.payments.update_one({"razorpay_order_id": order_id}, {"$set": {"status": "completed"}})
+            await db.videos.update_one({"video_id": payment["video_id"]}, {"$set": {"payment_completed": True}})
     return {"status": "ok"}
+
 
 @api_router.post("/billing/mock-complete")
 async def mock_complete_payment(video_id: str, user: dict = Depends(get_current_user)):
