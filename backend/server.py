@@ -245,8 +245,10 @@ async def create_session(request: Request, response: Response):
         key="session_token",
         value=session_token,
         httponly=True,
-        secure=True,
-        samesite="none",
+        secure=False,          # local dev
+        samesite="lax",        # local dev
+        #secure=True,
+        #samesite="none",
         path="/",
         max_age=7 * 24 * 60 * 60
     )
@@ -720,14 +722,18 @@ async def track_visitors(request: Request, call_next):
         
         # Check if already counted today
         visitor_key = f"{visitor_id}_{today}"
-        existing = await db.visitor_tracking.find_one({"key": visitor_key})
-        if not existing:
-            await db.visitor_tracking.insert_one({"key": visitor_key, "date": today})
-            await db.metrics.update_one(
-                {"date": today},
-                {"$inc": {"visitors": 1}},
-                upsert=True
-            )
+        try:
+            existing = await db.visitor_tracking.find_one({"key": visitor_key})
+            if not existing:
+                await db.visitor_tracking.insert_one({"key": visitor_key, "date": today})
+                await db.metrics.update_one(
+                    {"date": today},
+                    {"$inc": {"visitors": 1}},
+                    upsert=True
+                )
+        except Exception as e:
+            logger.warning(f"Visitor tracking skipped: {e}")
+
     
     return response
 
