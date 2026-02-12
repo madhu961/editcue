@@ -13,6 +13,8 @@ import Help from "@/pages/Help";
 import Navbar from "@/components/Navbar";
 import AuthCallback from "@/components/AuthCallback";
 
+axios.defaults.withCredentials = true;
+
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
 
