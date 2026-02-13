@@ -373,6 +373,11 @@ async def verify_otp(input: OTPVerifyInput, response: Response):
 import boto3
 from botocore.client import Config
 
+SPACES_REGION = os.environ.get("SPACES_REGION")
+SPACES_BUCKET = os.environ.get("SPACES_BUCKET")
+SPACES_ENDPOINT = os.environ.get("SPACES_ENDPOINT")
+SPACES_PUBLIC_BASE = os.environ.get("SPACES_PUBLIC_BASE")
+
 session = boto3.session.Session()
 s3 = session.client(
     "s3",
