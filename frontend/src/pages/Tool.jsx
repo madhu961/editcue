@@ -111,14 +111,29 @@ const Tool = () => {
       setPaymentRequired(requires_payment);
       if (initQuote) setQuote(initQuote);
 
-      // Upload file with progress tracking
-      await axios.put(presigned_url, selectedFile, {
-        headers: { "Content-Type": selectedFile.type || "application/octet-stream" },
-        onUploadProgress: (progressEvent) => {
-          const progress = Math.round((progressEvent.loaded / progressEvent.total) * 100);
-          setUploadProgress(progress);
-        }
-      });
+    // Upload file to Spaces using XHR (forces Origin header + supports progress)
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", presigned_url, true);
+
+    // Must match what Spaces expects; safe default is octet-stream
+    xhr.setRequestHeader("Content-Type", selectedFile.type || "application/octet-stream");
+
+    xhr.upload.onprogress = (evt) => {
+      if (!evt.lengthComputable) return;
+      const progress = Math.round((evt.loaded / evt.total) * 100);
+      setUploadProgress(progress);
+  };
+
+  xhr.onload = () => {
+    if (xhr.status >= 200 && xhr.status < 300) resolve();
+    else reject(new Error(`Spaces PUT failed: ${xhr.status} ${xhr.responseText || ""}`));
+  };
+
+  xhr.onerror = () => reject(new Error("Spaces PUT network error"));
+  xhr.send(selectedFile);
+});
+
 
       // Complete upload
       const completeResponse = await axios.post(

@@ -379,14 +379,18 @@ SPACES_ENDPOINT = os.environ.get("SPACES_ENDPOINT")
 SPACES_PUBLIC_BASE = os.environ.get("SPACES_PUBLIC_BASE")
 
 session = boto3.session.Session()
-s3 = session.client(
+s3 = boto3.client(
     "s3",
-    region_name=os.environ["SPACES_REGION"],
-    endpoint_url=os.environ["SPACES_ENDPOINT"],
-    aws_access_key_id=os.environ["SPACES_KEY"],
-    aws_secret_access_key=os.environ["SPACES_SECRET"],
-    config=Config(signature_version="s3v4"),
+    region_name=SPACES_REGION,
+    endpoint_url=f"https://{SPACES_REGION}.digitaloceanspaces.com",
+    aws_access_key_id=os.environ.get("SPACES_KEY"),
+    aws_secret_access_key=os.environ.get("SPACES_SECRET"),
+    config=Config(
+        signature_version="s3v4",
+        s3={"addressing_style": "virtual"}  # 🔥 THIS IS IMPORTANT
+    ),
 )
+
 
 def presign_put(bucket: str, key: str, content_type: str, expires=3600):
     return s3.generate_presigned_url(
@@ -418,7 +422,7 @@ async def init_upload(input: UploadInitInput, request: Request, user: dict = Dep
         Params={
             "Bucket": SPACES_BUCKET,
             "Key": object_key,
-            "ContentType": content_type,
+            #"ContentType": content_type,
         },
         ExpiresIn=60 * 15,  # 15 minutes
     )
