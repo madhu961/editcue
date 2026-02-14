@@ -20,6 +20,9 @@ import hashlib
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
+PAY_FIRST_MODE = os.getenv("PAY_FIRST_MODE","1")=="1"
+
+
 def hash_otp(email: str, otp: str) -> str:
     return hashlib.sha256(f"{email}:{otp}".encode()).hexdigest()
 
@@ -40,6 +43,32 @@ async def send_otp_email(to_email: str, otp: str):
     sg = SendGridAPIClient(os.environ["SENDGRID_API_KEY"])
     sg.send(message)
 
+ANTIDEO_API_KEY = os.getenv("ANTIDEO_API_KEY", "")
+ENABLE_ANTIDEO_EMAIL_CHECK = os.getenv("ENABLE_ANTIDEO_EMAIL_CHECK", "1") == "1"
+
+async def antideo_email_health(email: str) -> dict:
+    """
+    Calls Antideo email health endpoint:
+    GET https://api.antideo.com/email/{email}
+    API key must be provided in request header. :contentReference[oaicite:1]{index=1}
+    """
+    if not ANTIDEO_API_KEY:
+        return {"_skip": True, "_reason": "ANTIDEO_API_KEY not set"}
+
+    url = f"https://api.antideo.com/email/{email}"
+    headers = {
+        # Antideo docs: "pass the API Key in the header" (header name isn't shown in docs)
+        # Using common variants to be safe:
+        "APIKEY": ANTIDEO_API_KEY,
+        "apikey": ANTIDEO_API_KEY,
+        "X-API-KEY": ANTIDEO_API_KEY,
+    }
+
+    async with httpx.AsyncClient(timeout=6.0) as client:
+        r = await client.get(url, headers=headers)
+        # Antideo uses standard error codes like 401 if key is wrong. :contentReference[oaicite:2]{index=2}
+        r.raise_for_status()
+        return r.json()
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -147,6 +176,7 @@ class UploadInitInput(BaseModel):
     filename: str
     size_bytes: int
     ext: str
+    video_id: Optional[str] = None
 
 class UploadInitResponse(BaseModel):
     presigned_url: str
@@ -155,6 +185,7 @@ class UploadInitResponse(BaseModel):
     quote: Optional[dict] = None
 
 class UploadCompleteInput(BaseModel):
+    video_id: str
     object_key: str
     size_bytes: int
 
@@ -296,6 +327,31 @@ async def logout(request: Request, response: Response):
 
 @api_router.post("/auth/otp/request")
 async def request_otp(input: OTPRequestInput):
+    # Antideo email health check (before OTP)
+    if ENABLE_ANTIDEO_EMAIL_CHECK:
+        try:
+            info = await antideo_email_health(input.email)
+
+            # If Antideo is skipped because key not set, don't block logins
+            if not info.get("_skip"):
+                disposable = bool(info.get("disposable"))
+                spam = info.get("spam")
+                scam = info.get("scam")
+
+                # Recommended policy:
+                # - Block disposable
+                # - Block if spam/scam has a report object (not False)
+                if disposable:
+                    raise HTTPException(status_code=400, detail="Disposable emails are not allowed.")
+                if spam and spam is not False:
+                    raise HTTPException(status_code=400, detail="Email flagged as spam risk. Please use another email.")
+                if scam and scam is not False:
+                    raise HTTPException(status_code=400, detail="Email flagged as scam risk. Please use another email.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            # Fail-open: do not block OTP if Antideo is down
+            logging.warning(f"Antideo email check failed: {e}")
     otp = f"{secrets.randbelow(10**6):06d}"
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
 
@@ -399,39 +455,97 @@ def presign_put(bucket: str, key: str, content_type: str, expires=3600):
         ExpiresIn=expires,
     )
 
-@api_router.post("/uploads/init", response_model=UploadInitResponse)
-async def init_upload(input: UploadInitInput, request: Request, user: dict = Depends(get_current_user)):
-    """Initialize upload and get presigned URL"""
-    ext = input.ext.lower().lstrip('.')
-    
+class UploadReserveInput(BaseModel):
+    filename: str
+    size_bytes: int
+    ext: str
+
+@api_router.post("/uploads/reserve")
+async def reserve_upload(input: UploadReserveInput, user: dict = Depends(get_current_user)):
+    ext = input.ext.lower().lstrip(".")
     if ext not in SUPPORTED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported extension. Supported: {', '.join(SUPPORTED_EXTENSIONS)}")
-    
+        raise HTTPException(status_code=400, detail="Unsupported extension")
     if input.size_bytes > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="Unable to process files of this size at the moment.")
-    
-    safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in input.filename)
-    object_key = f"uploads/{user['user_id']}/{uuid.uuid4().hex}_{safe_name}"
 
+    video_id = f"vid_{uuid.uuid4().hex[:12]}"
     requires_payment = input.size_bytes > PAYMENT_THRESHOLD
-    
-    # Generate presigned PUT URL for DigitalOcean Spaces (S3-compatible)
-    content_type = "application/octet-stream"  # or detect from ext if you want
+    quote = calculate_quote(input.size_bytes, "one_time") if requires_payment else None
+
+    safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in input.filename)
+    object_key = f"uploads/{user['user_id']}/{video_id}_{safe_name}"
+
+    video = {
+        "video_id": video_id,
+        "user_id": user["user_id"],
+        "filename": safe_name,
+        "size_bytes": input.size_bytes,
+        "extension": ext,
+        "object_key": object_key,
+        "uploaded_at": None,
+        "upload_status": "reserved",           # NEW
+        "payment_required": requires_payment,
+        "payment_completed": (not requires_payment),
+        "file_url": f"{SPACES_PUBLIC_BASE}/{object_key}" if SPACES_PUBLIC_BASE else None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    await db.videos.insert_one(video)
+
+    return {
+        "video_id": video_id,
+        "object_key": object_key,
+        "requires_payment": requires_payment,
+        "quote": quote
+    }
+
+
+@api_router.post("/uploads/init", response_model=UploadInitResponse)
+async def init_upload(input: UploadInitInput, request: Request, user: dict = Depends(get_current_user)):
+    logger.info(f"[Init Upload Checking pay first mode {PAY_FIRST_MODE}")
+    # If PAY_FIRST_MODE: require a reserved video_id
+    if PAY_FIRST_MODE:
+        if not input.video_id:
+            raise HTTPException(status_code=400, detail="video_id required in pay-first mode")
+        logger.info(f"[Init Upload Fetching video")
+        video = await db.videos.find_one({"video_id": input.video_id, "user_id": user["user_id"]}, {"_id": 0})
+        if not video:
+            logger.info(f"[Init Upload Fetching video")
+            raise HTTPException(status_code=404, detail="Video not found")
+        logger.info(f"[Init Upload Fetched video {video}")
+        # hard block upload until paid (only when payment is required)
+        if video.get("payment_required") and not video.get("payment_completed"):
+            quote = calculate_quote(video["size_bytes"], "one_time")
+            return UploadInitResponse(
+                presigned_url=None,
+                object_key=video["object_key"],
+                requires_payment=True,
+                quote=quote
+            )
+
+        object_key = video["object_key"]
+        size_bytes = video["size_bytes"]
+
+    else:
+        # Your current behaviour (pay-after allowed)
+        ext = input.ext.lower().lstrip(".")
+        if ext not in SUPPORTED_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Unsupported extension")
+        if input.size_bytes > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="Unable to process files of this size at the moment.")
+        safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in input.filename)
+        object_key = f"uploads/{user['user_id']}/{uuid.uuid4().hex}_{safe_name}"
+        size_bytes = input.size_bytes
+
     presigned_url = s3.generate_presigned_url(
         ClientMethod="put_object",
-        Params={
-            "Bucket": SPACES_BUCKET,
-            "Key": object_key,
-            #"ContentType": content_type,
-        },
-        ExpiresIn=60 * 15,  # 15 minutes
+        Params={"Bucket": SPACES_BUCKET, "Key": object_key},
+        ExpiresIn=60 * 15,
     )
 
-    
-    quote = None
-    if requires_payment:
-        quote = calculate_quote(input.size_bytes, "one_time")
-    
+    requires_payment = size_bytes > PAYMENT_THRESHOLD
+    quote = calculate_quote(size_bytes, "one_time") if requires_payment else None
+
     return UploadInitResponse(
         presigned_url=presigned_url,
         object_key=object_key,
@@ -439,35 +553,37 @@ async def init_upload(input: UploadInitInput, request: Request, user: dict = Dep
         quote=quote
     )
 
+
 @api_router.post("/uploads/complete")
 async def complete_upload(input: UploadCompleteInput, user: dict = Depends(get_current_user)):
-    # Optional: verify file exists in Spaces
+
+    # verify exists in Spaces
     try:
         s3.head_object(Bucket=SPACES_BUCKET, Key=input.object_key)
     except Exception:
         raise HTTPException(status_code=400, detail="Upload not found in storage. Please retry upload.")
 
-    """Complete upload and create video record"""
-    video_id = f"vid_{uuid.uuid4().hex[:12]}"
-    ext = input.object_key.split('.')[-1]
-    
-    video = {
-        "video_id": video_id,
-        "user_id": user["user_id"],
-        "filename": input.object_key.split('/')[-1],
-        "size_bytes": input.size_bytes,
-        "extension": ext,
-        "object_key": input.object_key,
-        "uploaded_at": datetime.now(timezone.utc).isoformat(),
-        "payment_required": input.size_bytes > PAYMENT_THRESHOLD,
-        "payment_completed": input.size_bytes <= PAYMENT_THRESHOLD
-    }
-    file_url = f"{SPACES_PUBLIC_BASE}/{input.object_key}" if SPACES_PUBLIC_BASE else None
-    video["file_url"] = file_url
+    video = await db.videos.find_one({"video_id": input.video_id, "user_id": user["user_id"]})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
 
-    await db.videos.insert_one(video)
-    
-    return {"video_id": video_id, "payment_required": video["payment_required"]}
+    # (Optional) in pay-first mode ensure key matches reserved
+    if PAY_FIRST_MODE and video.get("object_key") != input.object_key:
+        raise HTTPException(status_code=400, detail="object_key mismatch")
+
+    await db.videos.update_one(
+        {"video_id": input.video_id, "user_id": user["user_id"]},
+        {"$set": {
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
+            "upload_status": "uploaded",
+            "size_bytes": input.size_bytes,
+            "payment_required": input.size_bytes > PAYMENT_THRESHOLD,
+            "payment_completed": video.get("payment_completed", False) or (input.size_bytes <= PAYMENT_THRESHOLD)
+        }}
+    )
+
+    return {"video_id": input.video_id, "payment_required": input.size_bytes > PAYMENT_THRESHOLD}
+
 
 # ============== BILLING ENDPOINTS ==============
 
@@ -502,12 +618,18 @@ client_rzp = razorpay.Client(auth=(os.environ["RAZORPAY_KEY_ID"], os.environ["RA
 
 @api_router.post("/billing/checkout")
 async def create_checkout(input: BillingCheckoutInput, user: dict = Depends(get_current_user)):
-    video = await db.videos.find_one({...})
+    video = await db.videos.find_one({"video_id": input.video_id, "user_id": user["user_id"]})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    if video.get("payment_completed"):
+        return {"already_paid": True}
+
     quote = calculate_quote(video["size_bytes"], input.mode)
 
     if input.mode == "one_time":
         order = client_rzp.order.create({
-            "amount": int(quote["amount"] * 100),
+            "amount": int(quote["amount"] * 100),  # paise
             "currency": "INR",
             "receipt": f"{input.video_id}",
             "notes": {"user_id": user["user_id"], "video_id": input.video_id}
@@ -523,7 +645,14 @@ async def create_checkout(input: BillingCheckoutInput, user: dict = Depends(get_
             "created_at": datetime.now(timezone.utc).isoformat()
         })
 
-        return {"order_id": order["id"], "amount": order["amount"], "currency": order["currency"], "key_id": os.environ["RAZORPAY_KEY_ID"]}
+        return {
+            "order_id": order["id"],
+            "amount": order["amount"],
+            "currency": order["currency"],
+            "key_id": os.environ["RAZORPAY_KEY_ID"]
+        }
+
+    raise HTTPException(status_code=400, detail="Unsupported mode")
 
 import hmac, hashlib
 
@@ -549,17 +678,58 @@ async def billing_webhook(request: Request):
             await db.videos.update_one({"video_id": payment["video_id"]}, {"$set": {"payment_completed": True}})
     return {"status": "ok"}
 
+class BillingVerifyInput(BaseModel):
+    video_id: str
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
 
-@api_router.post("/billing/mock-complete")
-async def mock_complete_payment(video_id: str, user: dict = Depends(get_current_user)):
-    """MOCKED: Complete payment for testing"""
-    result = await db.videos.update_one(
-        {"video_id": video_id, "user_id": user["user_id"]},
+@api_router.post("/billing/verify")
+async def verify_payment(input: BillingVerifyInput, user: dict = Depends(get_current_user)):
+    # 1) Ensure payment record exists and belongs to this user/video
+    payment = await db.payments.find_one({
+        "razorpay_order_id": input.razorpay_order_id,
+        "user_id": user["user_id"],
+        "video_id": input.video_id,
+    })
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment record not found")
+
+    if payment.get("status") == "completed":
+        return {"status": "already_completed"}
+
+    # 2) Verify signature (order_id|payment_id with key_secret)
+    try:
+        client_rzp.utility.verify_payment_signature({
+            "razorpay_order_id": input.razorpay_order_id,
+            "razorpay_payment_id": input.razorpay_payment_id,
+            "razorpay_signature": input.razorpay_signature,
+        })
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid payment signature")
+
+    # 3) Optional but strong: confirm payment is captured and amount matches
+    rp_payment = client_rzp.payment.fetch(input.razorpay_payment_id)
+    if rp_payment.get("status") != "captured":
+        raise HTTPException(status_code=400, detail=f"Payment not captured: {rp_payment.get('status')}")
+
+    # amount is in paise
+    expected_amount = int(payment["amount"] * 100)
+    if int(rp_payment.get("amount", 0)) != expected_amount:
+        raise HTTPException(status_code=400, detail="Amount mismatch")
+
+    # 4) Mark completed
+    await db.payments.update_one(
+        {"razorpay_order_id": input.razorpay_order_id},
+        {"$set": {"status": "completed", "razorpay_payment_id": input.razorpay_payment_id}}
+    )
+    await db.videos.update_one(
+        {"video_id": input.video_id, "user_id": user["user_id"]},
         {"$set": {"payment_completed": True}}
     )
-    if result.modified_count == 0:
-        raise HTTPException(status_code=404, detail="Video not found")
-    return {"message": "Payment completed (mocked)", "video_id": video_id}
+
+    return {"status": "ok", "video_id": input.video_id}
+
 
 # ============== JOB ENDPOINTS ==============
 
@@ -600,40 +770,208 @@ def parse_prompt(prompt_text: str) -> dict:
             result["quality"] = line[8:].strip().lower()
     
     # Default order if not specified
-    if not result["order"] and result["segments"]:
         result["order"] = [s["index"] for s in result["segments"]]
     
     return result
 
+import subprocess
+from botocore.exceptions import ClientError
+
+def ts_to_seconds(ts: str) -> float:
+    """
+    Accepts:
+      "SS", "MM:SS", "HH:MM:SS" (optionally with .ms)
+    Returns seconds as float.
+    """
+    ts = ts.strip()
+    parts = ts.split(":")
+    if len(parts) == 1:
+        return float(parts[0])
+    if len(parts) == 2:
+        mm, ss = parts
+        return float(mm) * 60 + float(ss)
+    if len(parts) == 3:
+        hh, mm, ss = parts
+        return float(hh) * 3600 + float(mm) * 60 + float(ss)
+    raise ValueError(f"Invalid timestamp: {ts}")
+
+def quality_to_crf(quality: str) -> int:
+    q = (quality or "medium").lower()
+    # lower CRF = higher quality / larger file
+    return {"high": 20, "medium": 23, "low": 28}.get(q, 23)
+
+async def head_with_retry(bucket: str, key: str, attempts: int = 6):
+    delay = 0.4
+    for _ in range(attempts):
+        try:
+            s3.head_object(Bucket=bucket, Key=key)
+            return
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code")
+            if code in ("404", "NoSuchKey", "NotFound"):
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 3.0)
+                continue
+            raise
+    raise RuntimeError(f"Object not found after retries: {key}")
+
 async def process_job(job_id: str):
-    """MOCKED: Process video job"""
-    await asyncio.sleep(5)  # Simulate processing
-    
-    job = await db.jobs.find_one({"job_id": job_id}, {"_id": 0})
-    if not job:
-        return
-    
-    # MOCKED: Update job as done
-    output_key = f"outputs/{job['user_id']}/{uuid.uuid4().hex}.mp4"
-    await db.jobs.update_one(
-        {"job_id": job_id},
-        {"$set": {
-            "status": "done",
-            "output_key": output_key,
-            "output_expires_at": (datetime.now(timezone.utc) + timedelta(days=OUTPUT_EXPIRY_DAYS)).isoformat(),
-            "completed_at": datetime.now(timezone.utc).isoformat()
-        }}
-    )
-    
-    # Increment today's videos processed
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    await db.metrics.update_one(
-        {"date": today},
-        {"$inc": {"videos_processed": 1}},
-        upsert=True
-    )
-    
-    logger.info(f"Job {job_id} completed (MOCKED)")
+    logger.info(f"[JOB {job_id}] start")
+
+    input_path = None
+    output_path = None
+
+    try:
+        job = await db.jobs.find_one({"job_id": job_id}, {"_id": 0})
+        if not job:
+            logger.error(f"[JOB {job_id}] not found")
+            return
+
+        await db.jobs.update_one({"job_id": job_id}, {"$set": {"status": "processing"}})
+        logger.info(f"[JOB {job_id}] status=processing")
+
+        video = await db.videos.find_one({"video_id": job["video_id"]}, {"_id": 0})
+        if not video:
+            raise RuntimeError("Video not found")
+
+        input_key = video["object_key"]
+        logger.info(f"[JOB {job_id}] input_key={input_key}")
+
+        parsed = job.get("parsed_prompt") or {}
+        segments = parsed.get("segments") or []
+        order = parsed.get("order") or [s.get("index") for s in segments]
+        out_fmt = (parsed.get("output_format") or "mp4").lower()
+        crf = quality_to_crf(parsed.get("quality"))
+
+        if not segments:
+            raise RuntimeError("No segments found in prompt. Use: Keep: 00:00-00:10")
+
+        # map index -> segment
+        seg_map = {s["index"]: s for s in segments if "index" in s and "start" in s and "end" in s}
+
+        ordered = []
+        for idx in order:
+            if idx in seg_map:
+                ordered.append(seg_map[idx])
+
+        if not ordered:
+            raise RuntimeError("Segment order invalid / no segments matched")
+
+        # local file paths
+        input_ext = (video.get("extension") or "mp4").lower()
+        input_path = UPLOAD_DIR / f"{job_id}_input.{input_ext}"
+        output_path = OUTPUT_DIR / f"{job_id}_output.{out_fmt}"
+        output_key = f"outputs/{job['user_id']}/{job_id}.{out_fmt}"
+
+        logger.info(f"[JOB {job_id}] download to {input_path}")
+
+        # ensure the object is readable (Spaces consistency / race)
+        await head_with_retry(SPACES_BUCKET, input_key)
+
+        # download from Spaces
+        s3.download_file(SPACES_BUCKET, input_key, str(input_path))
+        if not input_path.exists() or input_path.stat().st_size == 0:
+            raise RuntimeError("Input download failed / empty file")
+
+        logger.info(f"[JOB {job_id}] input size={input_path.stat().st_size}")
+
+        # Build filter_complex:
+        # [0:v]trim=start=..:end=..,setpts=PTS-STARTPTS[v0];
+        # [0:a]atrim=start=..:end=..,asetpts=PTS-STARTPTS[a0];
+        # ... concat=n=N:v=1:a=1[outv][outa]
+        filter_parts = []
+        concat_inputs = []
+        for i, seg in enumerate(ordered):
+            s = ts_to_seconds(seg["start"])
+            e = ts_to_seconds(seg["end"])
+            if e <= s:
+                raise RuntimeError(f"Invalid segment: {seg['start']}-{seg['end']}")
+
+            filter_parts.append(f"[0:v]trim=start={s}:end={e},setpts=PTS-STARTPTS[v{i}]")
+            filter_parts.append(f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS[a{i}]")
+            concat_inputs.append(f"[v{i}][a{i}]")
+
+        filter_complex = ";".join(filter_parts) + ";" + "".join(concat_inputs) + f"concat=n={len(ordered)}:v=1:a=1[outv][outa]"
+        logger.info(f"[JOB {job_id}] filter_complex={filter_complex}")
+
+        # ffmpeg command (re-encode for accurate cuts)
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_path),
+            "-filter_complex", filter_complex,
+            "-map", "[outv]",
+            "-map", "[outa]",
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", str(crf),
+            "-c:a", "aac",
+            "-b:a", "128k",
+            str(output_path)
+        ]
+
+        logger.info(f"[JOB {job_id}] run ffmpeg: {' '.join(cmd)}")
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            err = stderr.decode(errors="ignore")
+            raise RuntimeError(f"ffmpeg failed: {err[:2000]}")
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise RuntimeError("Output not created / empty")
+
+        logger.info(f"[JOB {job_id}] output size={output_path.stat().st_size}")
+
+        # upload output
+        logger.info(f"[JOB {job_id}] upload output_key={output_key}")
+        s3.upload_file(str(output_path), SPACES_BUCKET, output_key)
+
+        # verify output exists
+        s3.head_object(Bucket=SPACES_BUCKET, Key=output_key)
+        logger.info(f"[JOB {job_id}] output verified")
+
+        await db.jobs.update_one(
+            {"job_id": job_id},
+            {"$set": {
+                "status": "done",
+                "output_key": output_key,
+                "output_expires_at": (datetime.now(timezone.utc) + timedelta(days=OUTPUT_EXPIRY_DAYS)).isoformat(),
+                "completed_at": datetime.now(timezone.utc).isoformat()
+            }}
+        )
+
+        # metrics
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        await db.metrics.update_one({"date": today}, {"$inc": {"videos_processed": 1}}, upsert=True)
+
+        logger.info(f"[JOB {job_id}] done")
+
+    except Exception as e:
+        logger.exception(f"[JOB {job_id}] failed: {e}")
+        await db.jobs.update_one(
+            {"job_id": job_id},
+            {"$set": {
+                "status": "failed",
+                "error_message": str(e),
+                "completed_at": datetime.now(timezone.utc).isoformat()
+            }}
+        )
+    finally:
+        # cleanup local files
+        try:
+            if input_path and input_path.exists():
+                input_path.unlink()
+            if output_path and output_path.exists():
+                output_path.unlink()
+        except Exception as ce:
+            logger.warning(f"[JOB {job_id}] cleanup error: {ce}")
+
+
 
 @api_router.post("/jobs")
 async def create_job(input: JobCreateInput, background_tasks: BackgroundTasks, user: dict = Depends(get_current_user)):
@@ -698,25 +1036,27 @@ async def get_job(job_id: str, user: dict = Depends(get_current_user)):
 
 @api_router.get("/jobs/{job_id}/download")
 async def get_download_url(job_id: str, user: dict = Depends(get_current_user)):
-    """Get signed download URL for completed job"""
     job = await db.jobs.find_one({"job_id": job_id, "user_id": user["user_id"]}, {"_id": 0})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
-    if job["status"] != "done":
+
+    if job["status"] != "done" or not job.get("output_key"):
         raise HTTPException(status_code=400, detail="Job not completed")
-    
-    expires_at = job.get("output_expires_at")
-    if expires_at:
-        if isinstance(expires_at, str):
-            expires_at = datetime.fromisoformat(expires_at)
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < datetime.now(timezone.utc):
-            raise HTTPException(status_code=410, detail="Download link expired")
-    
-    # MOCKED: Return download URL
-    return {"download_url": f"/api/downloads/{job['output_key']}", "expires_at": expires_at}
+
+    # Ensure object exists in Spaces (prevents broken links)
+    try:
+        s3.head_object(Bucket=SPACES_BUCKET, Key=job["output_key"])
+    except Exception:
+        raise HTTPException(status_code=404, detail="Output file not found. Job may have failed to upload output.")
+
+    # Presigned GET URL (valid for 30 mins)
+    url = s3.generate_presigned_url(
+        ClientMethod="get_object",
+        Params={"Bucket": SPACES_BUCKET, "Key": job["output_key"]},
+        ExpiresIn=60 * 60 * 24 * 7
+    )
+
+    return {"download_url": url}
 
 # ============== METRICS ENDPOINTS ==============
 

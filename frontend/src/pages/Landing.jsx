@@ -27,7 +27,8 @@ const Landing = () => {
   const [otp, setOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
   const [loading, setLoading] = useState(false);
-
+  const [emailError, setEmailError] = useState("");
+  const isValidEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
   // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
   const handleGoogleLogin = () => {
     const redirectUrl = window.location.origin + '/tool';
@@ -39,7 +40,11 @@ const Landing = () => {
       toast.error("Please enter your email");
       return;
     }
-    
+    if (!isValidEmail(email)) {
+      setEmailError("Invalid email format");
+      toast.error("Invalid email format");
+      return;
+    }
     setLoading(true);
     try {
       const response = await axios.post(`${API}/auth/otp/request`, { email });
@@ -333,12 +338,22 @@ const Landing = () => {
                     type="email"
                     placeholder="Enter your email"
                     value={email}
-                    onChange={(e) => setEmail(e.target.value)}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setEmail(v);
+                      if (!v) setEmailError("");
+                      else if (!isValidEmail(v)) setEmailError("Invalid email format");
+                      else setEmailError("");
+                    }}
                     className="bg-input border-transparent focus:border-primary h-12"
                     data-testid="email-input"
                   />
+                  {emailError && (
+                    <div className="text-sm text-red-500 mt-2">{emailError}</div>
+                  )}
+
                   <Button 
-                    className="w-full bg-secondary hover:bg-secondary/80 py-6"
+                    className="w-full bg-primary text-primary-foreground hover:bg-primary/90 py-6"
                     onClick={handleRequestOTP}
                     disabled={loading}
                     data-testid="request-otp-btn"

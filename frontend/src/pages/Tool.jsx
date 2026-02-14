@@ -26,6 +26,17 @@ const SUPPORTED_EXTENSIONS = ['mp4', 'mkv', 'avi', 'mov', 'mpeg', 'ogv', 'webm']
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2GB
 const PAYMENT_THRESHOLD = 200 * 1024 * 1024; // 200MB
 
+const loadRazorpayScript = () =>
+  new Promise((resolve) => {
+    if (window.Razorpay) return resolve(true);
+    const script = document.createElement("script");
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+
+
 const Tool = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -98,7 +109,7 @@ const Tool = () => {
       // Initialize upload
       const ext = selectedFile.name.split('.').pop().toLowerCase();
       const initResponse = await axios.post(
-        `${API}/uploads/init`,
+        `${API}/uploads/reserve`,
         {
           filename: selectedFile.name,
           size_bytes: selectedFile.size,
@@ -164,24 +175,184 @@ const Tool = () => {
       setUploading(false);
     }
   };
+  const handleReserve = async () => {
+  if (!selectedFile) return;
 
-  const handleMockPayment = async () => {
-    if (!videoId) return;
+  setUploading(true);
+  setUploadProgress(0);
 
-    try {
-      await axios.post(
-        `${API}/billing/mock-complete?video_id=${videoId}`,
-        {},
-        { withCredentials: true }
-      );
-      
-      setPaymentComplete(true);
-      setCurrentStep(3);
-      toast.success("Payment successful! (MOCKED)");
-    } catch (error) {
-      toast.error("Payment failed");
+  try {
+    const ext = selectedFile.name.split(".").pop().toLowerCase();
+
+    const reserveResp = await axios.post(
+      `${API}/uploads/reserve`,
+      {
+        filename: selectedFile.name,
+        size_bytes: selectedFile.size,
+        ext
+      },
+      { withCredentials: true }
+    );
+
+    const { video_id, requires_payment, quote: q } = reserveResp.data;
+
+    setVideoId(video_id);
+    setPaymentRequired(requires_payment);
+    if (q) setQuote(q);
+
+    // Pay-first behavior:
+    // - If payment required: go to Step 2 (do NOT upload yet)
+    // - Else: allow upload immediately (Step 1 continues to upload)
+    if (requires_payment) {
+      setCurrentStep(2);
+      toast.info("Payment required before upload.");
+    } else {
+      setPaymentComplete(true); 
+      setCurrentStep(2);
+      toast.success("Reserved. No payment needed. Uploading now...");
+      await handleUploadToSpaces(video_id); 
     }
-  };
+  } catch (error) {
+    toast.error(error.response?.data?.detail || "Reserve failed");
+  } finally {
+    setUploading(false);
+  }
+};
+  const handleUploadToSpaces = async (vid) => {
+  const effectiveVideoId = vid || videoId;
+  if (!selectedFile || !effectiveVideoId) return;
+
+  setUploading(true);
+  setUploadProgress(0);
+
+  try {
+    const ext = selectedFile.name.split(".").pop().toLowerCase();
+
+    // In pay-first mode, init expects video_id and may return presigned_url=null if not paid
+    const initResp = await axios.post(
+      `${API}/uploads/init`,
+      {
+        filename: selectedFile.name,
+        size_bytes: selectedFile.size,
+        ext,
+        video_id: effectiveVideoId
+      },
+      { withCredentials: true }
+    );
+
+    const { presigned_url, object_key, requires_payment, quote: q } = initResp.data;
+
+    // If backend blocks upload until paid, it will return presigned_url = null
+    if (!presigned_url) {
+      setPaymentRequired(requires_payment);
+      if (q) setQuote(q);
+      setCurrentStep(2);
+      toast.info("Please complete payment before uploading.");
+      return;
+    }
+
+    // PUT to Spaces using XHR (your existing code)
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", presigned_url, true);
+      xhr.setRequestHeader("Content-Type", selectedFile.type || "application/octet-stream");
+
+      xhr.upload.onprogress = (evt) => {
+        if (!evt.lengthComputable) return;
+        setUploadProgress(Math.round((evt.loaded / evt.total) * 100));
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error(`Spaces PUT failed: ${xhr.status} ${xhr.responseText || ""}`));
+      };
+
+      xhr.onerror = () => reject(new Error("Spaces PUT network error"));
+      xhr.send(selectedFile);
+    });
+
+    // Complete upload (pay-first requires sending video_id)
+    await axios.post(
+      `${API}/uploads/complete`,
+      {
+        video_id: effectiveVideoId,
+        object_key,
+        size_bytes: selectedFile.size
+      },
+      { withCredentials: true }
+    );
+
+    setUploadComplete(true);
+    toast.success("Upload complete!");
+
+    // Now move to prompt / processing step
+    setCurrentStep(3);
+  } catch (error) {
+    toast.error(error.response?.data?.detail || "Upload failed");
+  } finally {
+    setUploading(false);
+  }
+};
+
+  const handleRazorpayPayment = async () => {
+  if (!videoId) return;
+
+  const ok = await loadRazorpayScript();
+  if (!ok) {
+    toast.error("Failed to load Razorpay. Please retry.");
+    return;
+  }
+
+  try {
+    // 1) Create order on backend
+    const { data } = await axios.post(
+      `${API}/billing/checkout`,
+      { video_id: videoId, mode: "one_time" },
+      { withCredentials: true }
+    );
+
+    if (data.already_paid) {
+      setPaymentComplete(true);
+      toast.success("Payment already completed.");
+      await handleUploadToSpaces(videoId);
+      return;
+    }
+
+    const options = {
+      key: data.key_id,
+      amount: data.amount,        // paise
+      currency: data.currency,
+      order_id: data.order_id,
+      name: "Video Tool",
+      description: "Video processing payment",
+      handler: async (resp) => {
+        // 2) Verify payment on backend (signature verify)
+        await axios.post(
+          `${API}/billing/verify`,
+          {
+            video_id: videoId,
+            razorpay_order_id: resp.razorpay_order_id,
+            razorpay_payment_id: resp.razorpay_payment_id,
+            razorpay_signature: resp.razorpay_signature
+          },
+          { withCredentials: true }
+        );
+
+        setPaymentComplete(true);
+        toast.success("Payment successful!");
+        await handleUploadToSpaces(videoId);
+
+      }
+    };
+
+    const rzp = new window.Razorpay(options);
+    rzp.on("payment.failed", () => toast.error("Payment failed"));
+    rzp.open();
+  } catch (e) {
+    toast.error("Could not start payment");
+  }
+};
+
 
   const handleSubmitJob = async () => {
     if (!videoId || !prompt.trim()) {
@@ -252,14 +423,14 @@ const Tool = () => {
         </div>
 
         {/* Stepper */}
-        <Stepper currentStep={currentStep} paymentRequired={paymentRequired} />
+        <Stepper currentStep={currentStep} paymentRequired={paymentRequired} paymentComplete={paymentComplete} uploadComplete={uploadComplete}/>
 
         {/* Main Content Area */}
         <div className="glass-card rounded-sm p-8 mb-8 relative overflow-hidden min-h-[400px]">
           {/* 3D Background during upload */}
           {uploading && <UploadScene progress={uploadProgress} />}
 
-          {/* Step 1: Upload */}
+          {/* Step 1: Reserve & Get Quote */}
           {currentStep === 1 && (
             <div className="relative z-10" data-testid="upload-step">
               {!selectedFile ? (
@@ -332,11 +503,11 @@ const Tool = () => {
                   {!uploading && !uploadComplete && (
                     <Button 
                       className="w-full bg-primary text-primary-foreground hover:bg-primary/90 py-6 font-bold uppercase tracking-wider"
-                      onClick={handleUpload}
+                      onClick={handleReserve}
                       data-testid="upload-btn"
                     >
                       <Upload className="w-5 h-5 mr-2" />
-                      Start Upload
+                      Reserve & Get Quote
                     </Button>
                   )}
                 </div>
@@ -367,18 +538,56 @@ const Tool = () => {
               <div className="flex flex-col gap-4 max-w-xs mx-auto">
                 <Button 
                   className="bg-primary text-primary-foreground hover:bg-primary/90 py-6 font-bold uppercase tracking-wider"
-                  onClick={handleMockPayment}
+                  onClick={handleRazorpayPayment}
                   data-testid="pay-btn"
                 >
-                  Pay Now (MOCKED)
+                  Pay Now
                 </Button>
                 <p className="text-xs text-muted-foreground">
                   <AlertTriangle className="w-3 h-3 inline mr-1" />
-                  Razorpay integration is mocked for demo
+                  Razorpay integration
                 </p>
               </div>
             </div>
           )}
+          
+          {/* Step 2.5: Upload to Spaces (after payment) */}
+{currentStep === 2 && paymentRequired && paymentComplete && !uploadComplete && (
+  <div className="relative z-10 text-center" data-testid="upload-after-pay-step">
+    <FileVideo className="w-16 h-16 text-primary mx-auto mb-6" />
+    <h2 className="text-2xl font-bold font-['Space_Grotesk'] mb-4">
+      Upload Video
+    </h2>
+    <p className="text-muted-foreground mb-6">
+      Payment is confirmed. Now uploading your video to start processing.
+    </p>
+
+    {uploading && (
+      <div className="max-w-md mx-auto mb-6">
+        <p className="text-sm text-muted-foreground mb-2">
+          Uploading... {uploadProgress}%
+        </p>
+        <Progress value={uploadProgress} className="h-2" />
+      </div>
+    )}
+
+    {!uploading && (
+      <div className="flex flex-col gap-3 max-w-xs mx-auto">
+        <Button
+          className="bg-primary text-primary-foreground hover:bg-primary/90 py-6 font-bold uppercase tracking-wider"
+          onClick={handleUploadToSpaces}
+          data-testid="upload-to-spaces-btn"
+        >
+          Upload to Spaces
+        </Button>
+
+        <p className="text-xs text-muted-foreground">
+          If auto-upload fails, you can retry here.
+        </p>
+      </div>
+    )}
+  </div>
+)}
 
           {/* Step 3: Prompt */}
           {currentStep === 3 && (
